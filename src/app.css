@@ -1,0 +1,15 @@
+@import 'tailwindcss';
+
+#app {
+  height: 100vh;
+  width: 100vw;
+}
+
+:root {
+  --jse-theme-color: #2C4435;
+  --jse-theme-color-highlight: #59886b;
+}
+
+.splitpanes__splitter {
+  width: 1rem !important;
+}
