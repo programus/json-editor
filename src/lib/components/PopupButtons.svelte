@@ -1,13 +1,29 @@
 <script lang="ts">
+  import { faDatabase } from "@fortawesome/free-solid-svg-icons";
+  import Fa from "svelte-fa"
+
+  interface PopupButtonsProps {
+    oncopy2right: () => void
+    oncopy2left: () => void
+    onsyncchanged: (enabled: boolean) => void
+    syncEnabled?: boolean
+    canSyncCheck: () => boolean
+    saveToBrowserDB: boolean
+    toggleSaveToBrowserDB?: () => void
+    hidden?: boolean
+  }
+
   let {
     oncopy2right,
     oncopy2left,
     onsyncchanged,
     hidden,
+    syncEnabled,
     canSyncCheck,
-  } = $props()
+    saveToBrowserDB,
+    toggleSaveToBrowserDB,
+  }: PopupButtonsProps = $props()
 
-  let syncEnabled = $state(false)
   let alertDialog: HTMLDialogElement | null = null
 </script>
 
@@ -45,5 +61,12 @@
     title="Copy left to right"
   >
     &gt;
+  </button>
+  <button
+    class="px-1 {saveToBrowserDB ? 'bg-(--jse-theme-color-highlight)! text-orange-300!' : ''}"
+    onclick={toggleSaveToBrowserDB}
+    title="Auto save to browser DB [Current {saveToBrowserDB ? 'ON' : 'OFF'}]"
+  >
+    <Fa icon={faDatabase} class="w-full my-1" />
   </button>
 </div>

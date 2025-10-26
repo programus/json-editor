@@ -21,7 +21,9 @@
   "dependencies": {
     "@fortawesome/free-solid-svg-icons": "^7.1.0",
     "@tailwindcss/vite": "^4.1.16",
+    "dexie": "^4.2.1",
     "lossless-json": "^4.3.0",
+    "svelte-fa": "^4.0.4",
     "svelte-jsoneditor": "^3.10.0",
     "svelte-splitpanes": "^8.0.9",
     "tailwindcss": "^4.1.16"
