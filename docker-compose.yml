@@ -1,0 +1,10 @@
+services:
+  json-editor:
+    platform: linux/amd64
+    container_name: json-editor
+    image: programus/json-editor:${TAG:-latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:80"
