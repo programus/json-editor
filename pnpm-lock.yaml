@@ -5,6 +5,9 @@ settings:
   excludeLinksFromLockfile: false
 
 dependencies:
+  '@fortawesome/free-solid-svg-icons':
+    specifier: ^7.1.0
+    version: 7.1.0
   '@tailwindcss/vite':
     specifier: ^4.1.16
     version: 4.1.16(vite@7.1.12)

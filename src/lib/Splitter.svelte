@@ -5,11 +5,11 @@
     oncopy2right,
     oncopy2left,
     onsyncchanged,
-    canSync = $bindable(true),
+    canSyncCheck,
   } = $props()
 
 </script>
 
 <div class="relative w-full h-full">
-  <PopupButtons {oncopy2right} {oncopy2left} {onsyncchanged} bind:canSync hidden={false} />
+  <PopupButtons {oncopy2right} {oncopy2left} {onsyncchanged} {canSyncCheck} hidden={false} />
 </div>
