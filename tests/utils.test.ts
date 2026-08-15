@@ -173,6 +173,33 @@ describe('debounce', () => {
     expect(fn).not.toHaveBeenCalled()
   })
 
+  it('reports whether a call is waiting to fire', () => {
+    vi.useFakeTimers()
+    const d = debounce(vi.fn(), 100)
+
+    expect(d.pending).toBe(false)
+    d.call(1)
+    expect(d.pending).toBe(true)
+
+    vi.advanceTimersByTime(100)
+    expect(d.pending).toBe(false)
+    vi.useRealTimers()
+  })
+
+  it('is no longer pending after a flush or a cancel', () => {
+    vi.useFakeTimers()
+    const d = debounce(vi.fn(), 100)
+
+    d.call(1)
+    d.flush()
+    expect(d.pending).toBe(false)
+
+    d.call(2)
+    d.cancel()
+    expect(d.pending).toBe(false)
+    vi.useRealTimers()
+  })
+
   it('cancel discards pending calls', () => {
     vi.useFakeTimers()
     const fn = vi.fn()

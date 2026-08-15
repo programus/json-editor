@@ -11,6 +11,22 @@ export interface PaneState {
   content: Content
   mode: Mode
   fileId: number | null
+  /**
+   * `updatedAt` of the revision this pane is based on, used to detect a write
+   * from another tab. `null` while no file is open.
+   */
+  baseUpdatedAt: number | null
+}
+
+/** A save that was refused because another tab changed the file first. */
+export interface SyncConflict {
+  paneIndex: number
+  fileId: number
+  fileName: string
+  /** The content this pane tried to save, replayed if the user overwrites. */
+  ours: Content
+  mode: Mode
+  theirs: FileInfo
 }
 
 const AUTOSAVE_DELAY_MS = 400
@@ -23,14 +39,27 @@ class EditorStore {
   // Default modes differ so the two panes are useful straight away: raw text on
   // the left, structured tree on the right. A file's saved mode overrides this.
   panes = $state<PaneState[]>([
-    { content: createDefaultContent(), mode: Mode.text, fileId: null },
-    { content: createDefaultContent(), mode: Mode.tree, fileId: null },
+    { content: createDefaultContent(), mode: Mode.text, fileId: null, baseUpdatedAt: null },
+    { content: createDefaultContent(), mode: Mode.tree, fileId: null, baseUpdatedAt: null },
   ])
 
   syncEnabled = $state(false)
 
   /** Transient message shown to the user when a storage operation fails. */
   errorMessage = $state<string | null>(null)
+
+  /** Set while a cross-tab conflict is waiting for the user to decide. */
+  conflict = $state<SyncConflict | null>(null)
+
+  /**
+   * True while both panes show the same file. Sync is then forced on and
+   * cannot be turned off: the two panes are literally one document, so letting
+   * them diverge would make each pane overwrite the other's autosave.
+   */
+  get syncLocked(): boolean {
+    const [first, second] = this.panes
+    return first.fileId !== null && first.fileId === second.fileId
+  }
 
   /**
    * Set while a sync-driven write is in flight. `svelte-jsoneditor` does not
@@ -41,17 +70,89 @@ class EditorStore {
   #applyingSync = false
 
   /** One debounced writer per pane so panes never cancel each other's saves. */
-  #savers = Array.from({ length: PANE_COUNT }, () =>
+  #savers = Array.from({ length: PANE_COUNT }, (_unused, paneIndex) =>
     debounce((fileId: number, content: Content, mode: Mode) => {
-      void saveFile(fileId, content, mode).then((ok) => {
-        // A failed write usually means the row is gone; resync from the DB.
-        if (!ok) this.#refreshFiles()
-      })
+      void this.#save(paneIndex, fileId, content, mode)
     }, AUTOSAVE_DELAY_MS),
   )
 
+  /**
+   * Write one pane's content, guarding against a concurrent write from another
+   * tab. On conflict nothing is stored and the user is asked what to do.
+   */
+  async #save(paneIndex: number, fileId: number, content: Content, mode: Mode, force = false) {
+    const pane = this.panes[paneIndex]
+    const base = force ? undefined : (pane.baseUpdatedAt ?? undefined)
+    const result = await saveFile(fileId, content, mode, base)
+
+    switch (result.status) {
+      case 'saved':
+        // Only advance the baseline if the pane still shows this file; it may
+        // have moved on while the write was in flight.
+        if (pane.fileId === fileId) pane.baseUpdatedAt = result.updatedAt
+        // Both panes on one file share a row, so both baselines must advance.
+        if (this.syncLocked) {
+          for (const other of this.panes) {
+            if (other.fileId === fileId) other.baseUpdatedAt = result.updatedAt
+          }
+        }
+        break
+      case 'conflict':
+        this.conflict = {
+          paneIndex,
+          fileId,
+          fileName: result.theirs.name,
+          ours: cloneContent(content),
+          mode,
+          theirs: result.theirs,
+        }
+        break
+      case 'missing':
+        // The row is gone; resync so `#reconcile` moves the pane somewhere valid.
+        this.#refreshFiles()
+        break
+      case 'failed':
+        break
+    }
+  }
+
+  /** Keep our edit and stamp it over the other tab's revision. */
+  resolveConflictWithOurs() {
+    const conflict = this.conflict
+    if (!conflict) return
+    this.conflict = null
+    void this.#save(conflict.paneIndex, conflict.fileId, conflict.ours, conflict.mode, true)
+  }
+
+  /** Discard our edit and adopt whatever the other tab stored. */
+  resolveConflictWithTheirs() {
+    const conflict = this.conflict
+    if (!conflict) return
+    this.conflict = null
+
+    this.panes.forEach((pane, index) => {
+      if (pane.fileId !== conflict.fileId) return
+      this.#savers[index].cancel()
+      pane.content = { text: conflict.theirs.text }
+      pane.baseUpdatedAt = conflict.theirs.updatedAt
+    })
+  }
+
   constructor() {
     this.syncEnabled = localStorage.getItem(SYNC_STORAGE_KEY) === 'true'
+  }
+
+  /**
+   * Re-apply the "same file means synced" rule after any change of open file.
+   *
+   * Opening the same file in both panes turns sync on; moving either pane to a
+   * different file turns it off again. Anyone who wants to sync two *different*
+   * files can switch it back on by hand, or use the copy buttons.
+   */
+  #applySyncLock() {
+    const locked = this.syncLocked
+    if (locked === this.syncEnabled) return
+    this.setSyncEnabled(locked)
   }
 
   /**
@@ -93,13 +194,21 @@ class EditorStore {
    */
   #reconcile(files: FileInfo[]) {
     if (files.length === 0) {
-      for (const pane of this.panes) pane.fileId = null
+      for (const pane of this.panes) {
+        pane.fileId = null
+        pane.baseUpdatedAt = null
+      }
+      this.#applySyncLock()
       void this.#createInitialFile()
       return
     }
 
     this.panes.forEach((pane, index) => {
-      if (pane.fileId !== null && files.some((file) => file.id === pane.fileId)) return
+      const open = pane.fileId === null ? undefined : files.find((file) => file.id === pane.fileId)
+      if (open) {
+        this.#adoptExternalRevision(index, open)
+        return
+      }
 
       if (pane.fileId !== null) {
         // The open file vanished; fall back to the nearest surviving file.
@@ -114,6 +223,36 @@ class EditorStore {
         : files.find((file) => file.id === storedId)
       this.#openFile(index, restored ?? files[Math.min(index, files.length - 1)])
     })
+
+    // Applied once at the end: mid-loop the panes can be in a transient state
+    // where both still point at the same file.
+    this.#applySyncLock()
+  }
+
+  /**
+   * Pick up a revision written by another tab.
+   *
+   * Only done when this pane has nothing queued and no unsaved edit, so a
+   * pane the user is typing in is never yanked out from under them — that case
+   * becomes a conflict prompt on the next save instead. Panes with an
+   * in-flight save are also skipped; their baseline is set by `#save`.
+   */
+  #adoptExternalRevision(paneIndex: number, file: FileInfo) {
+    const pane = this.panes[paneIndex]
+    if (file.updatedAt === undefined || file.updatedAt === pane.baseUpdatedAt) return
+    if (this.#savers[paneIndex].pending) return
+
+    let text: string
+    try {
+      text = contentToText(pane.content)
+    } catch {
+      // Unserializable content counts as an unsaved edit: leave the baseline
+      // alone so the difference surfaces as a conflict rather than being lost.
+      return
+    }
+    if (text !== file.text) return
+
+    pane.baseUpdatedAt = file.updatedAt
   }
 
   #creatingInitialFile = false
@@ -137,12 +276,18 @@ class EditorStore {
     return `file-${stamp.getFullYear()}${pad(stamp.getMonth() + 1)}${pad(stamp.getDate())}-${pad(stamp.getHours())}${pad(stamp.getMinutes())}${pad(stamp.getSeconds())}`
   }
 
-  /** Load a file's persisted text into a pane without touching the DB. */
+  /**
+   * Load a file's persisted text into a pane without touching the DB.
+   *
+   * Callers that change one pane in isolation must apply the sync lock
+   * afterwards; `#reconcile` does it once after updating both panes.
+   */
   #openFile(paneIndex: number, file: FileInfo) {
     const pane = this.panes[paneIndex]
     this.#savers[paneIndex].cancel()
     pane.fileId = file.id ?? null
     pane.content = { text: file.text }
+    pane.baseUpdatedAt = file.updatedAt ?? null
     if (file.mode) pane.mode = file.mode
     if (file.id !== undefined) {
       localStorage.setItem(paneStorageKey(paneIndex), String(file.id))
@@ -161,6 +306,9 @@ class EditorStore {
 
   selectFile(paneIndex: number, file: FileInfo) {
     this.#openFile(paneIndex, file)
+    // Update the lock first: moving off a shared file releases it, and landing
+    // on the file the other pane has open engages it.
+    this.#applySyncLock()
     if (this.syncEnabled) {
       // Sync means both panes show the same thing; mirror the newly opened file.
       this.#mirrorTo(paneIndex === 0 ? 1 : 0, this.panes[paneIndex].content)
@@ -213,7 +361,9 @@ class EditorStore {
     const pane = this.panes[paneIndex]
     const copy = cloneContent(content)
     pane.content = copy
-    if (pane.fileId !== null) {
+    // When both panes show the same file the source pane already queued this
+    // write; queueing it again would just write the same row twice.
+    if (pane.fileId !== null && !this.syncLocked) {
       this.#savers[paneIndex].call(pane.fileId, copy, pane.mode)
     }
   }
@@ -223,14 +373,23 @@ class EditorStore {
     this.#mirrorTo(toIndex, this.panes[fromIndex].content)
   }
 
+  /**
+   * Turn sync on or off. Refuses to switch it off while both panes show the
+   * same file, where the two editors are one document and must stay in step.
+   */
   setSyncEnabled(enabled: boolean) {
+    if (!enabled && this.syncLocked) return
     this.syncEnabled = enabled
     localStorage.setItem(SYNC_STORAGE_KEY, String(enabled))
   }
 
   async createAndOpen(paneIndex: number): Promise<FileInfo | undefined> {
     const file = await createFile(this.#nextFileName(), '{}', this.panes[paneIndex].mode)
-    if (file) this.#openFile(paneIndex, file)
+    if (file) {
+      this.#openFile(paneIndex, file)
+      // A brand new file is unique to this pane, so any lock is released.
+      this.#applySyncLock()
+    }
     return file
   }
 
@@ -262,7 +421,10 @@ class EditorStore {
 
     // `createFile` resolves name clashes, turning "notes" into "notes (2)".
     const file = await createFile(source.name, text, pane.mode)
-    if (file) this.#openFile(paneIndex, file)
+    if (file) {
+      this.#openFile(paneIndex, file)
+      this.#applySyncLock()
+    }
     return file
   }
 

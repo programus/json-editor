@@ -80,9 +80,9 @@ describe('saveFile', () => {
   it('persists text content verbatim', async () => {
     const file = await createFile('doc')
     const formatted = '{\n    "a":  1\n}'
-    const ok = await saveFile(file!.id!, { text: formatted }, Mode.text)
+    const result = await saveFile(file!.id!, { text: formatted }, Mode.text)
 
-    expect(ok).toBe(true)
+    expect(result.status).toBe('saved')
     const stored = await db.files.get(file!.id!)
     expect(stored!.text).toBe(formatted)
     expect(stored!.mode).toBe(Mode.text)
@@ -101,17 +101,76 @@ describe('saveFile', () => {
     expect((await db.files.get(file!.id!))!.updatedAt).toBeGreaterThan(1)
   })
 
-  it('reports a failure and returns false when the file no longer exists', async () => {
-    const ok = await saveFile(99999, { text: '{}' }, Mode.tree)
-    expect(ok).toBe(false)
+  it('reports the file as missing when the row no longer exists', async () => {
+    const result = await saveFile(99999, { text: '{}' }, Mode.tree)
+    expect(result.status).toBe('missing')
     expect(errors.join(' ')).toMatch(/no longer exists/i)
   })
 
   it('stores invalid JSON text without throwing (edits in progress)', async () => {
     const file = await createFile('doc')
-    const ok = await saveFile(file!.id!, { text: '{"broken":' }, Mode.text)
-    expect(ok).toBe(true)
+    const result = await saveFile(file!.id!, { text: '{"broken":' }, Mode.text)
+    expect(result.status).toBe('saved')
     expect((await db.files.get(file!.id!))!.text).toBe('{"broken":')
+  })
+
+  it('returns the new updatedAt so callers can track their baseline', async () => {
+    const file = await createFile('doc')
+    const result = await saveFile(file!.id!, { text: '{}' }, Mode.tree)
+
+    expect(result.status).toBe('saved')
+    const stored = await db.files.get(file!.id!)
+    expect(result.status === 'saved' && result.updatedAt).toBe(stored!.updatedAt)
+  })
+
+  it('advances updatedAt even for writes within the same millisecond', async () => {
+    const file = await createFile('doc')
+    const first = await saveFile(file!.id!, { text: '{"a":1}' }, Mode.tree)
+    const second = await saveFile(file!.id!, { text: '{"a":2}' }, Mode.tree)
+
+    expect(first.status).toBe('saved')
+    expect(second.status).toBe('saved')
+    const firstAt = first.status === 'saved' ? first.updatedAt : 0
+    const secondAt = second.status === 'saved' ? second.updatedAt : 0
+    expect(secondAt).toBeGreaterThan(firstAt)
+  })
+})
+
+describe('saveFile conflict detection', () => {
+  it('applies the write when the expected revision still matches', async () => {
+    const file = await createFile('doc')
+    const result = await saveFile(file!.id!, { text: '{"mine":1}' }, Mode.tree, file!.updatedAt)
+
+    expect(result.status).toBe('saved')
+    expect((await db.files.get(file!.id!))!.text).toBe('{"mine":1}')
+  })
+
+  it('refuses the write and reports the stored revision on a stale baseline', async () => {
+    const file = await createFile('doc')
+    // Simulate another tab writing first.
+    await saveFile(file!.id!, { text: '{"theirs":1}' }, Mode.tree)
+
+    const result = await saveFile(file!.id!, { text: '{"mine":1}' }, Mode.tree, file!.updatedAt)
+
+    expect(result.status).toBe('conflict')
+    expect(result.status === 'conflict' && result.theirs.text).toBe('{"theirs":1}')
+    // Nothing was overwritten.
+    expect((await db.files.get(file!.id!))!.text).toBe('{"theirs":1}')
+  })
+
+  it('skips the check entirely when no baseline is given', async () => {
+    const file = await createFile('doc')
+    await saveFile(file!.id!, { text: '{"theirs":1}' }, Mode.tree)
+
+    const result = await saveFile(file!.id!, { text: '{"mine":1}' }, Mode.tree)
+
+    expect(result.status).toBe('saved')
+    expect((await db.files.get(file!.id!))!.text).toBe('{"mine":1}')
+  })
+
+  it('reports a missing row before checking the baseline', async () => {
+    const result = await saveFile(99999, { text: '{}' }, Mode.tree, 123)
+    expect(result.status).toBe('missing')
   })
 })
 

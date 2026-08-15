@@ -20,13 +20,16 @@ beforeEach(() => {
   setDbErrorHandler(() => {})
   localStorage.clear()
 
-  store.setSyncEnabled(false)
-  store.setError(null)
-  // No file is open, so nothing is persisted by these tests.
+  // No file is open, so nothing is persisted by these tests. Panes are reset
+  // first: while both show one file the sync lock refuses to release.
   store.panes.forEach((pane) => {
     pane.fileId = null
     pane.content = { text: '{}' }
+    pane.baseUpdatedAt = null
   })
+  store.setSyncEnabled(false)
+  store.setError(null)
+  store.conflict = null
 })
 
 describe('copy buttons', () => {
@@ -118,5 +121,49 @@ describe('sync toggle', () => {
 
     expect(syncButton()).toHaveAttribute('aria-pressed', 'false')
     expect(syncButton()).toHaveAttribute('title', expect.stringContaining('OFF'))
+  })
+})
+
+describe('sync toggle when locked', () => {
+  /** Puts both panes on one file, which forces sync on and locks the button. */
+  function shareOneFile() {
+    store.panes.forEach((pane) => {
+      pane.fileId = 7
+    })
+  }
+
+  it('disables the button', () => {
+    shareOneFile()
+    store.setSyncEnabled(true)
+    render(PaneActions)
+
+    expect(syncButton()).toBeDisabled()
+    expect(syncButton()).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('explains why sync cannot be changed', () => {
+    shareOneFile()
+    store.setSyncEnabled(true)
+    render(PaneActions)
+
+    expect(syncButton()).toHaveAttribute('title', expect.stringContaining('same file'))
+  })
+
+  it('keeps sync on when the disabled button is clicked', async () => {
+    const user = userEvent.setup()
+    shareOneFile()
+    store.setSyncEnabled(true)
+    render(PaneActions)
+
+    await user.click(syncButton())
+    expect(store.syncEnabled).toBe(true)
+  })
+
+  it('is enabled again once the panes show different files', () => {
+    store.panes[0].fileId = 7
+    store.panes[1].fileId = 8
+    render(PaneActions)
+
+    expect(syncButton()).toBeEnabled()
   })
 })

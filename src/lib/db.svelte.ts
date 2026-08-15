@@ -80,30 +80,59 @@ export function listFiles(): Promise<FileInfo[]> {
   return db.files.orderBy('createdAt').toArray()
 }
 
+/** Outcome of a save attempt, so callers can react to each failure mode. */
+export type SaveResult =
+  | { status: 'saved'; updatedAt: number }
+  | { status: 'missing' }
+  | { status: 'failed' }
+  /**
+   * Someone else (another tab, or the other pane on a different file row)
+   * wrote this file since we last read it. The write was *not* applied.
+   */
+  | { status: 'conflict'; theirs: FileInfo }
+
 /**
- * Persist editor content. Returns whether the write actually landed: Dexie
- * resolves with 0 when the row no longer exists (e.g. the file was deleted
- * from the other pane while this one was still typing).
+ * Persist editor content.
+ *
+ * When `expectedUpdatedAt` is given the write is a compare-and-set: it only
+ * lands if the stored `updatedAt` still matches, which is how a concurrent
+ * write from another tab is detected instead of silently clobbered. The read
+ * and the write share one transaction so nothing can slip in between.
  */
-export async function saveFile(id: number, content: Content, mode: Mode): Promise<boolean> {
+export async function saveFile(
+  id: number,
+  content: Content,
+  mode: Mode,
+  expectedUpdatedAt?: number,
+): Promise<SaveResult> {
   let text: string
   try {
     text = contentToText(content)
   } catch (error) {
     reportError('Could not serialize content, changes were not saved.', error)
-    return false
+    return { status: 'failed' }
   }
 
   try {
-    const updated = await db.files.update(id, { text, mode, updatedAt: Date.now() })
-    if (updated === 0) {
-      reportError('The file no longer exists, changes were not saved.', undefined)
-      return false
-    }
-    return true
+    return await db.transaction('rw', db.files, async () => {
+      const current = await db.files.get(id)
+      if (!current) {
+        reportError('The file no longer exists, changes were not saved.', undefined)
+        return { status: 'missing' } as SaveResult
+      }
+      if (expectedUpdatedAt !== undefined && current.updatedAt !== expectedUpdatedAt) {
+        return { status: 'conflict', theirs: current } as SaveResult
+      }
+
+      // Monotonic: two writes within the same millisecond must not look equal,
+      // or the next compare-and-set could pass against a stale baseline.
+      const updatedAt = Math.max(Date.now(), current.updatedAt + 1)
+      await db.files.update(id, { text, mode, updatedAt })
+      return { status: 'saved', updatedAt } as SaveResult
+    })
   } catch (error) {
     reportError('Saving failed. Browser storage may be full or unavailable.', error)
-    return false
+    return { status: 'failed' }
   }
 }
 

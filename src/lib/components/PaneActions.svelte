@@ -2,6 +2,12 @@
   import { store } from '../store.svelte'
   import { isSameContent } from '../utils.svelte'
 
+  const syncTitle = $derived(
+    store.syncLocked
+      ? 'Both panes show the same file — sync is required'
+      : `Toggle sync [currently ${store.syncEnabled ? 'ON' : 'OFF'}]`,
+  )
+
   function toggleSync() {
     if (store.syncEnabled) {
       store.setSyncEnabled(false)
@@ -26,12 +32,16 @@
   class="pointer-events-none absolute top-1/4 left-1/2 z-10 flex -translate-x-1/2 flex-col items-center gap-px"
 >
   <div
-    class="pointer-events-auto flex flex-col-reverse gap-px bg-white [&>button]:cursor-pointer [&>button]:bg-(--jse-theme-color) [&>button]:px-1 [&>button]:font-mono [&>button]:text-white [&>button]:hover:bg-(--jse-theme-color-highlight)"
+    class="pointer-events-auto flex flex-col-reverse gap-px bg-white [&>button]:cursor-pointer [&>button]:bg-(--jse-theme-color) [&>button]:px-1 [&>button]:font-mono [&>button]:text-white [&>button]:not-disabled:hover:bg-(--jse-theme-color-highlight)"
   >
+    <!-- When locked the button keeps its "on" look but reads as unavailable. -->
     <button
       class={store.syncEnabled ? 'bg-(--jse-theme-color-highlight)! text-orange-300!' : ''}
+      class:opacity-60={store.syncLocked}
+      class:cursor-default!={store.syncLocked}
       onclick={toggleSync}
-      title="Toggle sync [currently {store.syncEnabled ? 'ON' : 'OFF'}]"
+      disabled={store.syncLocked}
+      title={syncTitle}
       aria-pressed={store.syncEnabled}
     >
       ↔

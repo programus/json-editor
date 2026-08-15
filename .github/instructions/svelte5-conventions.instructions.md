@@ -110,6 +110,29 @@ Use `liveQuery` for reactive IndexedDB reads; the returned store is accessed wit
   directly instead of threading props and callbacks through each other
 - Writes are debounced through the store; never call `db` directly from a component
 
+## Sync Lock and Concurrent Writes
+
+The two panes are one document whenever they show the same file, so:
+
+- `store.syncLocked` is true while both panes have the same `fileId`. Sync is
+  then forced on and `setSyncEnabled(false)` refuses to release it.
+- Any change of open file must re-apply the rule. `selectFile`,
+  `createAndOpen`, `duplicateAndOpen` and `#reconcile` all call
+  `#applySyncLock()` *after* the pane's `fileId` has been updated.
+- Leaving a shared file always turns sync off; a user who wants two different
+  files synced re-enables it by hand.
+- While locked only the edited pane writes; mirroring skips the save so the
+  shared row is not written twice.
+
+Cross-tab safety uses optimistic concurrency, not a `BroadcastChannel`:
+Dexie's `liveQuery` already crosses tabs, so only `text` needs protecting.
+Each pane keeps a `baseUpdatedAt` baseline, `saveFile` does a compare-and-set
+inside one transaction, and a mismatch surfaces as `store.conflict` with
+*Keep mine* / *Reload theirs*. Never silently merge or overwrite.
+
+When resetting `store` in `beforeEach`, reset the panes **before** calling
+`setSyncEnabled(false)`, or the lock refuses to release and tests leak.
+
 ## Third-Party Editor Boundary
 
 `svelte-jsoneditor` and `svelte-splitpanes` are used through their public APIs
@@ -163,7 +186,7 @@ tests/
   setup.ts                     # jest-dom, fake-indexeddb, jsdom shims
   utils.test.ts                # Pure helpers
   db.test.ts                   # Dexie CRUD
-  store.test.ts                # Load, autosave, sync, deletion recovery
+  store.test.ts                # Load, autosave, sync lock, conflicts, recovery
   FileSelectorCombo.test.ts    # Dropdown, search, rename, delete dialog
   PaneActions.test.ts          # Copy buttons and the sync guard
 ```

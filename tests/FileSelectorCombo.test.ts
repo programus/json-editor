@@ -25,6 +25,7 @@ async function seed(names: string[]) {
   // Open the first file in pane 0, mirroring what the real subscription does.
   store.panes[0].fileId = ids[0] as number
   store.panes[0].content = { text: store.files[0].text }
+  store.panes[0].baseUpdatedAt = store.files[0].updatedAt
   return ids as number[]
 }
 
@@ -46,12 +47,15 @@ beforeEach(async () => {
   localStorage.clear()
 
   store.files = []
-  store.setSyncEnabled(false)
-  store.setError(null)
+  // Panes first: while both show one file the sync lock refuses to release.
   store.panes.forEach((pane) => {
     pane.fileId = null
     pane.content = { text: '{}' }
+    pane.baseUpdatedAt = null
   })
+  store.setSyncEnabled(false)
+  store.setError(null)
+  store.conflict = null
 })
 
 describe('dropdown', () => {

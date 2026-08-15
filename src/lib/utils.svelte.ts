@@ -98,7 +98,13 @@ function isLosslessNumber(value: object): boolean {
 export function debounce<Args extends unknown[]>(
   fn: (...args: Args) => void,
   delay: number,
-): { call: (...args: Args) => void; flush: () => void; cancel: () => void } {
+): {
+  call: (...args: Args) => void
+  flush: () => void
+  cancel: () => void
+  /** True while a call is waiting to fire. */
+  readonly pending: boolean
+} {
   let timer: ReturnType<typeof setTimeout> | undefined
   let pending: Args | undefined
 
@@ -124,6 +130,9 @@ export function debounce<Args extends unknown[]>(
       clearTimeout(timer)
       timer = undefined
       pending = undefined
+    },
+    get pending() {
+      return pending !== undefined
     },
   }
 }

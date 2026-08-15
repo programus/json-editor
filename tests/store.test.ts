@@ -50,15 +50,18 @@ beforeEach(async () => {
   await db.files.clear()
   localStorage.clear()
 
-  // Reset shared store state between tests.
-  store.setSyncEnabled(false)
-  store.setError(null)
+  // Reset shared store state between tests. Panes come first: with both panes
+  // on one file the sync lock would refuse to release.
   store.panes.forEach((pane) => {
     pane.fileId = null
     pane.content = { text: '{}' }
+    pane.baseUpdatedAt = null
   })
   store.panes[0].mode = Mode.text
   store.panes[1].mode = Mode.tree
+  store.setSyncEnabled(false)
+  store.setError(null)
+  store.conflict = null
 })
 
 afterEach(() => {
@@ -263,9 +266,15 @@ describe('sync', () => {
   })
 
   it('does not mirror when disabled', async () => {
+    // Two files, so the panes land on different ones and sync is not locked on.
+    await db.files.bulkAdd([
+      { name: 'a', text: '"A"', mode: Mode.tree, createdAt: 1, updatedAt: 1 },
+      { name: 'b', text: '"B"', mode: Mode.tree, createdAt: 2, updatedAt: 2 },
+    ])
     teardown = store.subscribeToFiles()
     await waitForPanesReady()
     store.setSyncEnabled(false)
+    expect(store.syncEnabled).toBe(false)
 
     store.handleChange(0, { text: '{"solo":true}' }, false)
     expect(store.panes[1].content).not.toEqual({ text: '{"solo":true}' })
@@ -304,6 +313,240 @@ describe('sync', () => {
     store.flush()
 
     await waitForText(otherFileId, '{"synced":1}')
+  })
+})
+
+/** Seeds two files and returns their ids in creation order. */
+async function seedTwoFiles() {
+  const ids = await db.files.bulkAdd(
+    [
+      { name: 'a', text: '{"a":1}', mode: Mode.tree, createdAt: 1, updatedAt: 1 },
+      { name: 'b', text: '{"b":1}', mode: Mode.tree, createdAt: 2, updatedAt: 2 },
+    ],
+    { allKeys: true },
+  )
+  return ids as number[]
+}
+
+describe('sync lock', () => {
+  it('locks and enables sync when both panes open the same file', async () => {
+    // A single file means both panes land on it.
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+
+    expect(store.panes[0].fileId).toBe(store.panes[1].fileId)
+    expect(store.syncLocked).toBe(true)
+    expect(store.syncEnabled).toBe(true)
+  })
+
+  it('is not locked while the panes show different files', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+
+    expect(store.syncLocked).toBe(false)
+    expect(store.syncEnabled).toBe(false)
+  })
+
+  it('refuses to turn sync off while locked', async () => {
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+
+    store.setSyncEnabled(false)
+    expect(store.syncEnabled).toBe(true)
+  })
+
+  it('releases the lock and turns sync off when a pane moves to another file', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+
+    // Put both panes on file "a" to engage the lock.
+    store.selectFile(1, store.files!.find((file) => file.name === 'a')!)
+    expect(store.syncLocked).toBe(true)
+    expect(store.syncEnabled).toBe(true)
+
+    store.selectFile(1, store.files!.find((file) => file.name === 'b')!)
+    expect(store.syncLocked).toBe(false)
+    expect(store.syncEnabled).toBe(false)
+  })
+
+  it('does not restore a manual sync that predated the lock', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+
+    store.selectFile(1, store.files!.find((file) => file.name === 'a')!)
+    store.selectFile(1, store.files!.find((file) => file.name === 'b')!)
+
+    // Leaving a shared file always turns sync off; the user re-enables by hand.
+    expect(store.syncEnabled).toBe(false)
+  })
+
+  it('releases the lock when a pane switches to a brand new file', async () => {
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    expect(store.syncLocked).toBe(true)
+
+    await store.createAndOpen(1)
+    expect(store.syncLocked).toBe(false)
+    expect(store.syncEnabled).toBe(false)
+  })
+
+  it('releases the lock when a pane switches to a duplicate', async () => {
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    expect(store.syncLocked).toBe(true)
+
+    await store.duplicateAndOpen(1)
+    expect(store.syncLocked).toBe(false)
+    expect(store.syncEnabled).toBe(false)
+  })
+
+  it('engages the lock when the panes end up on one file after a deletion', async () => {
+    const ids = await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    expect(store.syncLocked).toBe(false)
+
+    // Pane 1 loses its file and falls back onto pane 0's.
+    await store.deleteFileById(ids[1])
+    await waitForFiles(1)
+    await waitFor(() => store.panes[1].fileId === ids[0])
+
+    expect(store.syncLocked).toBe(true)
+    expect(store.syncEnabled).toBe(true)
+  })
+
+  it('writes the shared row only once per edit while locked', async () => {
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    expect(store.syncLocked).toBe(true)
+
+    const update = vi.spyOn(db.files, 'update')
+    store.handleChange(0, { text: '{"once":1}' }, false)
+    store.flush()
+    await waitForText(store.panes[0].fileId!, '{"once":1}')
+
+    expect(update).toHaveBeenCalledTimes(1)
+    update.mockRestore()
+  })
+
+  it('still writes both files when syncing two different files', async () => {
+    const ids = await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    store.setSyncEnabled(true)
+
+    store.handleChange(0, { text: '{"both":1}' }, false)
+    store.flush()
+
+    await waitForText(ids[0], '{"both":1}')
+    await waitForText(ids[1], '{"both":1}')
+  })
+})
+
+describe('cross-tab conflicts', () => {
+  it('reports a conflict instead of overwriting another tab\u2019s write', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    const fileId = store.panes[0].fileId!
+
+    // Simulate another tab writing straight to the row.
+    await db.files.update(fileId, { text: '{"theirs":1}', updatedAt: Date.now() + 5000 })
+
+    store.handleChange(0, { text: '{"mine":1}' }, false)
+    store.flush(0)
+    await waitFor(() => store.conflict !== null)
+
+    expect(store.conflict!.fileId).toBe(fileId)
+    expect(store.conflict!.paneIndex).toBe(0)
+    // The other tab's text survived.
+    expect((await db.files.get(fileId))!.text).toBe('{"theirs":1}')
+  })
+
+  it('keeps our edit when the user chooses to overwrite', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    const fileId = store.panes[0].fileId!
+
+    await db.files.update(fileId, { text: '{"theirs":1}', updatedAt: Date.now() + 5000 })
+    store.handleChange(0, { text: '{"mine":1}' }, false)
+    store.flush(0)
+    await waitFor(() => store.conflict !== null)
+
+    store.resolveConflictWithOurs()
+    await waitForText(fileId, '{"mine":1}')
+    expect(store.conflict).toBeNull()
+  })
+
+  it('adopts the other revision when the user chooses to reload', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    const fileId = store.panes[0].fileId!
+
+    await db.files.update(fileId, { text: '{"theirs":1}', updatedAt: Date.now() + 5000 })
+    store.handleChange(0, { text: '{"mine":1}' }, false)
+    store.flush(0)
+    await waitFor(() => store.conflict !== null)
+
+    store.resolveConflictWithTheirs()
+    expect(store.conflict).toBeNull()
+    expect(store.panes[0].content).toEqual({ text: '{"theirs":1}' })
+    expect((await db.files.get(fileId))!.text).toBe('{"theirs":1}')
+  })
+
+  it('a second edit after overwriting does not conflict again', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    const fileId = store.panes[0].fileId!
+
+    await db.files.update(fileId, { text: '{"theirs":1}', updatedAt: Date.now() + 5000 })
+    store.handleChange(0, { text: '{"mine":1}' }, false)
+    store.flush(0)
+    await waitFor(() => store.conflict !== null)
+    store.resolveConflictWithOurs()
+    await waitForText(fileId, '{"mine":1}')
+
+    store.handleChange(0, { text: '{"mine":2}' }, false)
+    store.flush(0)
+    await waitForText(fileId, '{"mine":2}')
+    expect(store.conflict).toBeNull()
+  })
+
+  it('does not flag a conflict for an external write the pane has no edits against', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    const fileId = store.panes[0].fileId!
+    const theirText = store.panes[0].content as { text: string }
+
+    // Another tab rewrites the row with the same text the pane already shows.
+    await db.files.update(fileId, { text: theirText.text, updatedAt: Date.now() + 5000 })
+    await waitFor(() => store.panes[0].baseUpdatedAt !== 1)
+
+    store.handleChange(0, { text: '{"mine":1}' }, false)
+    store.flush(0)
+    await waitForText(fileId, '{"mine":1}')
+    expect(store.conflict).toBeNull()
+  })
+
+  it('does not adopt an external revision while the pane has unsaved edits', async () => {
+    await seedTwoFiles()
+    teardown = store.subscribeToFiles()
+    await waitForPanesReady()
+    const fileId = store.panes[0].fileId!
+
+    store.handleChange(0, { text: '{"mine":1}' }, false)
+    await db.files.update(fileId, { text: '{"theirs":1}', updatedAt: Date.now() + 5000 })
+    await waitFor(async () => (await db.files.get(fileId))!.text === '{"theirs":1}')
+
+    // The pane keeps showing the user's edit rather than being yanked away.
+    expect(store.panes[0].content).toEqual({ text: '{"mine":1}' })
   })
 })
 
