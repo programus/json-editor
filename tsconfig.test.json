@@ -1,0 +1,15 @@
+{
+  "extends": "@tsconfig/svelte/tsconfig.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "types": ["vitest/globals", "@testing-library/jest-dom/vitest", "node"],
+    "noEmit": true,
+    "moduleDetection": "force",
+    "strict": true,
+    "verbatimModuleSyntax": true
+  },
+  // The tests import from `src`, so both trees are part of this program.
+  "include": ["tests/**/*.ts", "src/**/*.ts", "src/**/*.svelte"]
+}

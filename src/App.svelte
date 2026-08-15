@@ -1,113 +1,62 @@
 <script lang="ts">
-  import { mount, unmount } from 'svelte'
-  import { Mode, toJSONContent, type Content } from 'svelte-jsoneditor'
-  import { Splitpanes, Pane } from 'svelte-splitpanes'
-  import Splitter from './lib/components/Splitter.svelte'
-  import JSONEditorEx from './lib/components/JSONEditorEx.svelte'
-  import { defaultContent } from './lib/utils.svelte'
-  import { save } from './lib/db.svelte';
-
-  function isSameContent(a: Content, b: Content): boolean {
-    try {
-      return JSON.stringify(toJSONContent(a).json) === JSON.stringify(toJSONContent(b).json)
-    } catch {
-      return false
-    }
-  }
-
-  let meta = $state([
-    {
-      title: 'left-json-editor',
-      content: defaultContent,
-      mode: Mode.text,
-    },
-    {
-      title: 'right-json-editor',
-      content: defaultContent,
-      mode: Mode.tree,
-    }
-  ])
-
-  let saveToBrowserDB = $state(true)
-  let syncContents = $state(false)
+  import { Pane, Splitpanes } from 'svelte-splitpanes'
+  import EditorPane from './lib/components/EditorPane.svelte'
+  import PaneActions from './lib/components/PaneActions.svelte'
+  import { setDbErrorHandler } from './lib/db.svelte'
+  import { store } from './lib/store.svelte'
 
   $effect(() => {
-    const splitterElement = document.querySelector('.splitpanes__splitter')
-    if (splitterElement) {
-      const splitter = mount(Splitter, {
-        target: splitterElement,
-        props: {
-          oncopy2right: () => {
-            meta[1].content = meta[0].content
-            save(meta[1])
-          },
-          oncopy2left: () => {
-            meta[0].content = meta[1].content
-            save(meta[0])
-          },
-          onsyncchanged: (enabled: boolean) => {
-            syncContents = enabled
-            localStorage.setItem('sync-contents', String(enabled))
-          },
-          syncEnabled: syncContents,
-          canSyncCheck: () => {
-            return isSameContent(meta[0].content, meta[1].content)
-          },
-          saveToBrowserDB,
-          toggleSaveToBrowserDB: () => {
-            saveToBrowserDB = !saveToBrowserDB
-            localStorage.setItem('save-to-browser-db', String(saveToBrowserDB))
-          }
-        }
-      })
+    setDbErrorHandler((message) => store.setError(message))
+    return store.subscribeToFiles()
+  })
 
-      return () => unmount(splitter)
+  // Make sure a pending autosave is not lost when the tab goes away.
+  $effect(() => {
+    const flushAll = () => store.flush()
+    window.addEventListener('pagehide', flushAll)
+    document.addEventListener('visibilitychange', flushAll)
+    return () => {
+      window.removeEventListener('pagehide', flushAll)
+      document.removeEventListener('visibilitychange', flushAll)
+      flushAll()
     }
   })
 
+  // Auto-dismiss error messages so they do not linger forever.
   $effect(() => {
-    const savedSetting = localStorage.getItem('save-to-browser-db')
-    if (savedSetting !== 'false') {
-      saveToBrowserDB = true
-    } else {
-      saveToBrowserDB = false
-    }
-  })
-
-  $effect(() => {
-    const syncSetting = localStorage.getItem('sync-contents')
-    if (syncSetting === 'true') {
-      syncContents = true
-    } else {
-      syncContents = false
-    }
+    if (!store.errorMessage) return
+    const timer = setTimeout(() => store.setError(null), 6000)
+    return () => clearTimeout(timer)
   })
 </script>
 
-<div class="h-full w-full relative">
+<div class="relative h-full w-full">
   <Splitpanes>
-    {#each meta as m, i (i)}
-      <Pane>
-        <div class="h-full w-full">
-          <JSONEditorEx bind:content={meta[i].content} bind:mode={meta[i].mode}
-            syncFunc={(content) => {
-              const otherIndex = i === 0 ? 1 : 0
-              meta[otherIndex].content = content
-              if (saveToBrowserDB) {
-                // Save the other editor's content as well
-                const otherMeta = meta[otherIndex]
-                save(otherMeta)
-              }
-            }}
-            editorTitle={meta[i].title}
-            {syncContents}
-            {saveToBrowserDB}
-          />
-        </div>
-      </Pane>
-    {/each}
+    <Pane>
+      <EditorPane paneIndex={0} />
+    </Pane>
+    <Pane>
+      <EditorPane paneIndex={1} />
+    </Pane>
   </Splitpanes>
-</div>
 
-<style>
-</style>
+  <PaneActions />
+
+  {#if store.errorMessage}
+    <div class="pointer-events-none absolute inset-x-0 bottom-4 z-50 flex justify-center">
+      <div
+        role="alert"
+        class="pointer-events-auto flex items-center gap-3 rounded border border-red-300 bg-red-50 px-4 py-2 text-sm text-red-800 shadow-lg"
+      >
+        <span>{store.errorMessage}</span>
+        <button
+          onclick={() => store.setError(null)}
+          class="cursor-pointer text-red-500 hover:text-red-800"
+          aria-label="Dismiss"
+        >
+          ✕
+        </button>
+      </div>
+    </div>
+  {/if}
+</div>

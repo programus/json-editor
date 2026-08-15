@@ -8,9 +8,17 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+.pnpm-store
 dist
 dist-ssr
 *.local
+
+# Test output
+coverage
+
+# Compiled output of the config files, should tsc ever emit it
+*.config.js
+*.config.d.ts
 
 # Editor directories and files
 .vscode/*
