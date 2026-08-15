@@ -1,7 +1,10 @@
 # syntax=docker/dockerfile:1
 
 # --- Stage 1: build the static bundle -------------------------------------
-FROM node:lts-slim AS assets
+# Pinned to the build host's architecture: the output is platform-neutral
+# JavaScript, so building it once and reusing it for every target platform
+# avoids running the whole toolchain under emulation.
+FROM --platform=$BUILDPLATFORM node:lts-slim AS assets
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME:$PATH"
 RUN corepack enable
@@ -19,16 +22,23 @@ COPY . .
 RUN pnpm run build
 
 # --- Stage 2: build the file server ---------------------------------------
-FROM golang:1.24-alpine AS server
+# Also pinned to the build host: Go cross-compiles natively, which is far
+# faster than emulating the compiler on the target architecture.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS server
+ARG TARGETOS
+ARG TARGETARCH
 WORKDIR /src
 # No third-party modules, so there is nothing to download; go.mod alone is
 # enough to compile and test.
 COPY server/go.mod ./
 COPY server/*.go ./
+# Tests run on the build host's architecture. The server has no
+# architecture-specific code, so one native run covers every target.
 RUN go vet ./... && go test ./...
 # Fully static so the binary can run on scratch: no cgo, no dynamic loader.
 # Symbol tables and DWARF data are stripped since they are useless in an image.
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/fileserver .
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -ldflags="-s -w" -o /out/fileserver .
 
 # --- Stage 3: runtime -----------------------------------------------------
 # `scratch` holds nothing but our binary and the bundle: no shell, no libc, no
