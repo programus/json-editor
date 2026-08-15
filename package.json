@@ -13,7 +13,7 @@
     "test:coverage": "vitest run --coverage",
     "test:server": "cd server && go vet ./... && go test ./...",
     "verify": "npm run check && npm run test && npm run build",
-    "docker:build": "docker compose build"
+    "docker:build": "docker compose build --pull"
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.1",

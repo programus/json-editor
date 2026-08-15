@@ -39,9 +39,17 @@ The image is built on `scratch` and contains nothing but a statically linked
 file server and the built assets — no shell, no libc, no package manager, so
 there is essentially no OS attack surface to patch.
 
+Because there is no OS, the Go standard library is the *only* component a
+vulnerability scanner can find, and it judges it purely by the toolchain
+version stamped into the binary — it does not check whether an affected package
+is reachable. The build therefore leaves the Go minor version unpinned and
+compiles with whatever release is current, which keeps that one component
+patched. Build with `--pull` (as `pnpm run docker:build` does) or Docker will
+reuse a cached base image and defeat this.
+
 | | |
 |---|---|
-| Size | ~7.5 MB |
+| Size | ~7.7 MB |
 | Serves | pre-compressed brotli/gzip, negotiated per request |
 | Cache headers | `immutable` for hashed assets, `no-cache` for `index.html` |
 | Health check | `GET /healthz`, also wired into `HEALTHCHECK` |
@@ -62,6 +70,6 @@ pnpm dev              # dev server with hot reload
 
 pnpm verify           # typecheck + tests + production build
 pnpm test             # the frontend regression suite
-pnpm run test:server  # the file server's Go tests (requires Go)
-pnpm run docker:build # build the production image
+pnpm run test:server  # the file server's Go tests (requires Go 1.26+)
+pnpm run docker:build # build the production image (pulls the latest Go)
 ```

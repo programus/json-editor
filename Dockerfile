@@ -24,9 +24,29 @@ RUN pnpm run build
 # --- Stage 2: build the file server ---------------------------------------
 # Also pinned to the build host: Go cross-compiles natively, which is far
 # faster than emulating the compiler on the target architecture.
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS server
+#
+# The Go minor version is deliberately left unpinned. A `scratch` image holds
+# nothing a scanner can inspect except the toolchain version Go stamps into the
+# binary, and scanners report every advisory for that version without checking
+# whether the affected package is even reachable. So the toolchain is the only
+# lever on the vulnerability report, and a pinned minor version silently rots:
+# Go supports only its two most recent releases, so a pin becomes a permanent
+# source of unpatched advisories a few months after it is written.
+#
+# Floating gives up bit-for-bit reproducibility, and picks up major bumps
+# unreviewed. The `go test` below is what makes that safe — a toolchain that
+# breaks this server fails the build instead of shipping. Pin a released
+# image's digest if you need to reproduce one exactly.
+#
+# Note this only takes effect with `docker build --pull`; see the docker:build
+# script in package.json.
+FROM --platform=$BUILDPLATFORM golang:alpine AS server
 ARG TARGETOS
 ARG TARGETARCH
+# Refuse to build with a toolchain older than go.mod's floor rather than
+# quietly downloading a second one, so a stale cached base image is a loud
+# failure instead of an old binary.
+ENV GOTOOLCHAIN=local
 WORKDIR /src
 # No third-party modules, so there is nothing to download; go.mod alone is
 # enough to compile and test.
