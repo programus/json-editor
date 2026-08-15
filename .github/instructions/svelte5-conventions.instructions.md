@@ -168,6 +168,32 @@ Rules for new tests:
 - `EditorPane.svelte` is deliberately untested: it is a thin wrapper whose body
   is the third-party `JSONEditor`, which needs a real browser to mount.
 
+## Build Output and Container
+
+The production image is built in three stages and ends on `scratch`:
+
+1. `node:lts-slim` builds `dist/`. The `precompress` plugin in
+   `build/precompress.ts` also emits `.br` and `.gz` siblings for every
+   compressible asset, using Node's built-in zlib so no dependency is added.
+2. `golang:alpine` vets, tests and statically links `server/main.go`.
+3. `scratch` holds only that binary plus `dist/`. No shell, no libc, no package
+   manager, so there is nearly no OS surface to patch (~7.5 MB total).
+
+Consequences to keep in mind:
+
+- The main JS chunk is ~940 kB because `svelte-jsoneditor` imports CodeMirror
+  statically. Splitting it would mean patching that dependency's internals, so
+  it is served pre-compressed (~265 kB brotli) instead and
+  `chunkSizeWarningLimit` is raised to match. Do not "fix" the warning by
+  reaching into `node_modules`.
+- The server runs as uid 65532 on port 8080; ports below 1024 need privileges
+  it does not have.
+- `scratch` has no shell, so `HEALTHCHECK` cannot use `CMD-SHELL` and there is
+  no `curl`. The binary probes itself via `fileserver -healthcheck`.
+- `server/` is plain Go with **zero third-party modules**; keep it that way, as
+  that is most of the security argument for not using nginx. Its tests run
+  inside the image build, so a broken server fails the build.
+
 ## File Organization
 
 ```
@@ -182,6 +208,11 @@ src/
     utils.svelte.ts  # Pure helpers (content compare, serialize, debounce)
   App.svelte         # Layout + global error toast
   main.ts            # Entry point
+build/
+  precompress.ts     # Vite plugin: emits .br/.gz next to each asset
+server/
+  main.go            # Static file server (stdlib only)
+  main_test.go       # Encoding negotiation, cache headers, SPA fallback
 tests/
   setup.ts                     # jest-dom, fake-indexeddb, jsdom shims
   utils.test.ts                # Pure helpers

@@ -1,5 +1,12 @@
 node_modules
+dist
 Dockerfile
 docker-compose.yml
-.vscode/*
-dist
+.dockerignore
+.git
+.gitignore
+.vscode
+.github
+coverage
+tests
+*.md

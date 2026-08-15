@@ -7,4 +7,12 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:80"
+      - "8080:8080"
+    restart: unless-stopped
+    # The image is a single static binary plus read-only assets, so it needs no
+    # writable layer and no privileges at all.
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
